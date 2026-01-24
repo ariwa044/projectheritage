@@ -1,0 +1,510 @@
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { Navbar } from "@/components/Navbar";
+import { supabase } from "@/integrations/supabase/client";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { ArrowLeft, Check, Send } from "lucide-react";
+import type { User } from "@supabase/supabase-js";
+
+const InternalTransfer = () => {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showReceipt, setShowReceipt] = useState(false);
+  const [receiptData, setReceiptData] = useState<any>(null);
+  const [showPinVerify, setShowPinVerify] = useState(false);
+  const [verifyPin, setVerifyPin] = useState("");
+  const [pendingTransferData, setPendingTransferData] = useState<any>(null);
+
+  const [formData, setFormData] = useState({
+    recipientIdentifier: "", // username or account number
+    amount: "",
+  });
+  const [recipientName, setRecipientName] = useState<string>("");
+  const [lookupLoading, setLookupLoading] = useState(false);
+
+  useEffect(() => {
+    const checkUser = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        navigate("/auth");
+        return;
+      }
+      setUser(session.user);
+    };
+    checkUser();
+  }, [navigate]);
+
+  // Lookup recipient when identifier changes
+  useEffect(() => {
+    const lookupRecipient = async () => {
+      if (!formData.recipientIdentifier || formData.recipientIdentifier.length < 3) {
+        setRecipientName("");
+        return;
+      }
+
+      setLookupLoading(true);
+      
+      try {
+        // First try to find by username
+        const { data: profileByUsername } = await supabase
+          .from("profiles")
+          .select("id, full_name")
+          .eq("username", formData.recipientIdentifier)
+          .maybeSingle();
+
+        if (profileByUsername) {
+          setRecipientName(profileByUsername.full_name);
+          setLookupLoading(false);
+          return;
+        }
+
+        // Then try by account number
+        const { data: accountData } = await supabase
+          .from("accounts")
+          .select("user_id")
+          .eq("account_number", formData.recipientIdentifier)
+          .maybeSingle();
+
+        if (accountData?.user_id) {
+          const { data: profile } = await supabase
+            .from("profiles")
+            .select("full_name")
+            .eq("id", accountData.user_id)
+            .single();
+
+          if (profile) {
+            setRecipientName(profile.full_name);
+          } else {
+            setRecipientName("");
+          }
+        } else {
+          setRecipientName("");
+        }
+      } catch (error) {
+        console.error("Recipient lookup error:", error);
+        setRecipientName("");
+      } finally {
+        setLookupLoading(false);
+      }
+    };
+
+    const timeoutId = setTimeout(lookupRecipient, 500);
+    return () => clearTimeout(timeoutId);
+  }, [formData.recipientIdentifier]);
+
+  const handleTransferSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!formData.recipientIdentifier || !formData.amount) {
+      toast({ title: "Error", description: "Please fill all fields", variant: "destructive" });
+      return;
+    }
+
+    const transferAmount = parseFloat(formData.amount);
+    if (transferAmount <= 0) {
+      toast({ title: "Error", description: "Amount must be greater than 0", variant: "destructive" });
+      return;
+    }
+
+    // Store transfer data and show PIN dialog
+    setPendingTransferData(formData);
+    setShowPinVerify(true);
+  };
+
+  const handleVerifyPin = async () => {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("transfer_pin, status")
+      .eq("id", user!.id)
+      .maybeSingle();
+
+    if (!profile?.transfer_pin) {
+      toast({ 
+        title: "No PIN Set", 
+        description: "Please set up your transfer PIN first",
+        variant: "destructive" 
+      });
+      setShowPinVerify(false);
+      setVerifyPin("");
+      return;
+    }
+
+    if (profile.transfer_pin !== verifyPin) {
+      toast({ title: "Error", description: "Incorrect PIN", variant: "destructive" });
+      return;
+    }
+
+    // Check if account is blocked
+    if (profile.status === "blocked") {
+      toast({
+        title: "Account Suspended",
+        description: "This payment is on pending because the account has temporary suspended. Please reach out to the customer care.",
+        variant: "destructive"
+      });
+      setShowPinVerify(false);
+      setVerifyPin("");
+      setPendingTransferData(null);
+      return;
+    }
+
+    // PIN verified and account not blocked, proceed with transfer
+    setShowPinVerify(false);
+    setVerifyPin("");
+    await processTransfer();
+  };
+
+  const processTransfer = async () => {
+    if (!pendingTransferData) return;
+
+    const transferAmount = parseFloat(pendingTransferData.amount);
+    setLoading(true);
+
+    try {
+      // Get sender's account
+      const { data: senderAccounts } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", user!.id)
+        .eq("status", "active")
+        .order("balance", { ascending: false })
+        .limit(1);
+
+      if (!senderAccounts || senderAccounts.length === 0) {
+        toast({ title: "Error", description: "No active account found", variant: "destructive" });
+        setLoading(false);
+        return;
+      }
+
+      const senderAccount = senderAccounts[0];
+      const senderBalance = parseFloat(senderAccount.balance?.toString() || '0');
+
+      // Check if sender has sufficient balance
+      if (senderBalance < transferAmount) {
+        toast({ 
+          title: "Insufficient Funds", 
+          description: `You need $${transferAmount.toFixed(2)} but only have $${senderBalance.toFixed(2)}`,
+          variant: "destructive" 
+        });
+        setLoading(false);
+        return;
+      }
+
+      // Find recipient by username or account number
+      const { data: recipientProfile } = await supabase
+        .from("profiles")
+        .select("id, email, full_name, username")
+        .or(`username.eq.${pendingTransferData.recipientIdentifier}`)
+        .maybeSingle();
+
+      let recipientUserId = recipientProfile?.id;
+
+      // If not found by username, try by account number
+      if (!recipientUserId) {
+        const { data: recipientAccount } = await supabase
+          .from("accounts")
+          .select("user_id")
+          .eq("account_number", pendingTransferData.recipientIdentifier)
+          .maybeSingle();
+
+        recipientUserId = recipientAccount?.user_id;
+      }
+
+      if (!recipientUserId) {
+        toast({ 
+          title: "Recipient Not Found", 
+          description: "User with this username or account number does not exist",
+          variant: "destructive" 
+        });
+        setLoading(false);
+        return;
+      }
+
+      // Check if trying to send to self
+      if (recipientUserId === user!.id) {
+        toast({ 
+          title: "Invalid Transfer", 
+          description: "You cannot send money to yourself",
+          variant: "destructive" 
+        });
+        setLoading(false);
+        return;
+      }
+
+      // Get recipient's account
+      const { data: recipientAccounts } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", recipientUserId)
+        .eq("status", "active")
+        .limit(1);
+
+      if (!recipientAccounts || recipientAccounts.length === 0) {
+        toast({ title: "Error", description: "Recipient has no active account", variant: "destructive" });
+        setLoading(false);
+        return;
+      }
+
+      const recipientAccount = recipientAccounts[0];
+      const recipientBalance = parseFloat(recipientAccount.balance?.toString() || '0');
+
+      // Get recipient's full profile for email
+      const { data: fullRecipientProfile } = await supabase
+        .from("profiles")
+        .select("email, full_name")
+        .eq("id", recipientUserId)
+        .single();
+
+      // Get sender's profile for email
+      const { data: senderProfile } = await supabase
+        .from("profiles")
+        .select("email, full_name")
+        .eq("id", user!.id)
+        .single();
+
+      // Generate transaction ID
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
+      const timestamp = new Date().toISOString();
+
+      // Update sender's balance (deduct)
+      const newSenderBalance = senderBalance - transferAmount;
+      await supabase
+        .from("accounts")
+        .update({ balance: newSenderBalance })
+        .eq("id", senderAccount.id);
+
+      // Update recipient's balance (add)
+      const newRecipientBalance = recipientBalance + transferAmount;
+      await supabase
+        .from("accounts")
+        .update({ balance: newRecipientBalance })
+        .eq("id", recipientAccount.id);
+
+      // Create transaction record for sender (debit)
+      await supabase
+        .from("transactions")
+        .insert({
+          account_id: senderAccount.id,
+          amount: transferAmount,
+          transaction_type: "debit",
+          description: `Transfer to ${fullRecipientProfile?.full_name || 'User'}`,
+          recipient: fullRecipientProfile?.full_name || 'User',
+          status: "completed"
+        });
+
+      // Create transaction record for recipient (credit)
+      await supabase
+        .from("transactions")
+        .insert({
+          account_id: recipientAccount.id,
+          amount: transferAmount,
+          transaction_type: "credit",
+          description: `Transfer from ${senderProfile?.full_name || 'User'}`,
+          recipient: senderProfile?.full_name || 'User',
+          status: "completed"
+        });
+
+      // Send debit alert to sender
+      try {
+        await supabase.functions.invoke("send-debit-alert", {
+          body: {
+            email: senderProfile?.email,
+            name: senderProfile?.full_name,
+            recipientName: fullRecipientProfile?.full_name,
+            amount: transferAmount,
+            currency: senderAccount.currency || "USD",
+            currentBalance: newSenderBalance,
+            transactionId: transactionId,
+            timestamp: timestamp,
+          },
+        });
+      } catch (emailError) {
+        console.error("Error sending debit alert:", emailError);
+      }
+
+      // Send credit alert to recipient
+      try {
+        await supabase.functions.invoke("send-credit-alert", {
+          body: {
+            email: fullRecipientProfile?.email,
+            name: fullRecipientProfile?.full_name,
+            senderName: senderProfile?.full_name,
+            amount: transferAmount,
+            currency: recipientAccount.currency || "USD",
+            currentBalance: newRecipientBalance,
+            transactionId: transactionId,
+            timestamp: timestamp,
+          },
+        });
+      } catch (emailError) {
+        console.error("Error sending credit alert:", emailError);
+      }
+
+      setReceiptData({
+        recipientName: fullRecipientProfile?.full_name,
+        amount: transferAmount,
+        transactionId: transactionId,
+        date: new Date(timestamp).toLocaleString(),
+        newBalance: newSenderBalance,
+        currency: senderAccount.currency || "USD"
+      });
+
+      setShowReceipt(true);
+      setFormData({ recipientIdentifier: "", amount: "" });
+      setPendingTransferData(null);
+      
+      toast({ 
+        title: "Transfer Successful", 
+        description: `$${transferAmount.toFixed(2)} sent successfully` 
+      });
+    } catch (error: any) {
+      console.error("Transfer error:", error);
+      toast({ 
+        title: "Transfer Failed", 
+        description: error.message || "An error occurred during transfer",
+        variant: "destructive" 
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Navbar />
+      <div className="pt-24 pb-12">
+        <div className="container mx-auto px-4 max-w-2xl">
+          <Button onClick={() => navigate("/dashboard")} variant="ghost" className="mb-6">
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to Dashboard
+          </Button>
+
+          <div className="mb-8">
+            <h1 className="text-4xl font-bold text-foreground mb-2">Send Money</h1>
+            <p className="text-muted-foreground">Transfer funds to another Heritage Bank user</p>
+          </div>
+
+          <Card className="p-6">
+            <form onSubmit={handleTransferSubmit} className="space-y-6">
+              <div>
+                <Label>Recipient (Username or Account Number)</Label>
+                <Input 
+                  placeholder="Enter username or 10-digit account number"
+                  value={formData.recipientIdentifier}
+                  onChange={(e) => setFormData({...formData, recipientIdentifier: e.target.value})}
+                  required 
+                />
+                {lookupLoading && (
+                  <p className="text-sm text-muted-foreground mt-2">Looking up recipient...</p>
+                )}
+                {!lookupLoading && recipientName && (
+                  <div className="mt-2 p-3 bg-accent/10 rounded-lg border border-accent/20">
+                    <p className="text-sm text-muted-foreground">Sending to:</p>
+                    <p className="text-base font-semibold text-foreground">{recipientName}</p>
+                  </div>
+                )}
+                {!lookupLoading && formData.recipientIdentifier && !recipientName && formData.recipientIdentifier.length >= 3 && (
+                  <p className="text-sm text-destructive mt-2">
+                    Recipient not found. Please check the username or account number.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <Label>Amount ($)</Label>
+                <Input 
+                  type="number" 
+                  step="0.01"
+                  min="0.01"
+                  placeholder="0.00"
+                  value={formData.amount}
+                  onChange={(e) => setFormData({...formData, amount: e.target.value})}
+                  required 
+                />
+              </div>
+
+              <Button type="submit" className="w-full" disabled={loading}>
+                <Send className="w-4 h-4 mr-2" />
+                {loading ? "Processing..." : "Send Money"}
+              </Button>
+            </form>
+          </Card>
+        </div>
+      </div>
+
+      <Dialog open={showPinVerify} onOpenChange={setShowPinVerify}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Enter Transfer PIN</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>4-digit PIN</Label>
+              <Input 
+                type="password" 
+                maxLength={4}
+                value={verifyPin}
+                onChange={(e) => setVerifyPin(e.target.value.replace(/\D/g, ''))}
+              />
+            </div>
+            <Button onClick={handleVerifyPin} className="w-full">Continue</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showReceipt} onOpenChange={setShowReceipt}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-center text-2xl">Transfer Receipt</DialogTitle>
+          </DialogHeader>
+          <div className="p-6 bg-gradient-to-br from-background to-secondary/20 rounded-lg">
+            <div className="flex items-center justify-center mb-6">
+              <div className="w-16 h-16 bg-green-500 rounded-full flex items-center justify-center">
+                <Check className="w-8 h-8 text-white" />
+              </div>
+            </div>
+            <h3 className="text-center text-xl font-semibold text-foreground mb-6">
+              Transfer Successful
+            </h3>
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Recipient:</span>
+                <span className="font-semibold">{receiptData?.recipientName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Amount:</span>
+                <span className="font-semibold text-lg">${receiptData?.amount?.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Transaction ID:</span>
+                <span className="font-mono text-xs">{receiptData?.transactionId}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Date:</span>
+                <span className="font-semibold">{receiptData?.date}</span>
+              </div>
+              <div className="flex justify-between pt-3 border-t">
+                <span className="text-muted-foreground">New Balance:</span>
+                <span className="font-bold text-lg">${receiptData?.newBalance?.toFixed(2)}</span>
+              </div>
+            </div>
+            <Button onClick={() => {
+              setShowReceipt(false);
+              navigate("/transactions");
+            }} className="w-full mt-6">
+              View Transaction History
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+
+export default InternalTransfer;
