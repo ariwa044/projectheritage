@@ -47,35 +47,43 @@ const TransactionHistory = () => {
 
   const loadTransactions = async (userId: string) => {
     try {
+      console.log("[TransactionHistory] Loading transactions for user:", userId);
       let allTransactions: Transaction[] = [];
 
       // Fetch from transactions table via accounts
-      const { data: accounts } = await supabase
+      const { data: accounts, error: accountsError } = await supabase
         .from("accounts")
         .select("id")
         .eq("user_id", userId);
 
+      console.log("[TransactionHistory] Accounts found:", accounts?.length || 0, accountsError ? `Error: ${accountsError.message}` : "");
+
       if (accounts && accounts.length > 0) {
         const accountIds = accounts.map((acc) => acc.id);
-        const { data: txns } = await supabase
+        const { data: txns, error: txnError } = await supabase
           .from("transactions")
           .select("*")
           .in("account_id", accountIds)
           .order("created_at", { ascending: false });
 
-        if (txns) {
+        console.log("[TransactionHistory] Transactions from 'transactions' table:", txns?.length || 0, txnError ? `Error: ${txnError.message}` : "");
+        if (txns && txns.length > 0) {
+          console.log("[TransactionHistory] Sample transaction statuses:", txns.slice(0, 5).map(t => ({ id: t.id.slice(0, 8), status: t.status, desc: t.description })));
           allTransactions = txns;
         }
       }
 
       // Also fetch from transfers table (admin edits update this table)
-      const { data: transfers } = await supabase
+      const { data: transfers, error: transfersError } = await supabase
         .from("transfers")
         .select("*")
         .eq("user_id", userId)
         .order("created_at", { ascending: false });
 
+      console.log("[TransactionHistory] Transfers from 'transfers' table:", transfers?.length || 0, transfersError ? `Error: ${transfersError.message}` : "");
+
       if (transfers && transfers.length > 0) {
+        console.log("[TransactionHistory] Sample transfer statuses:", transfers.slice(0, 5).map(t => ({ id: t.id.slice(0, 8), status: t.status, recipient: t.recipient_name })));
         const mappedTransfers: Transaction[] = transfers.map((t) => ({
           id: t.id,
           amount: t.amount,
@@ -89,12 +97,14 @@ const TransactionHistory = () => {
       }
 
       // Check admin_logs for any status overrides (when direct DB update was blocked by RLS)
-      const { data: adminOverrides } = await supabase
+      const { data: adminOverrides, error: overridesError } = await supabase
         .from("admin_logs")
         .select("details")
         .eq("target_user_id", userId)
         .in("action_type", ["override_transaction_status", "edit_transaction"])
         .order("created_at", { ascending: false });
+
+      console.log("[TransactionHistory] Admin overrides found:", adminOverrides?.length || 0, overridesError ? `Error: ${overridesError.message}` : "");
 
       if (adminOverrides && adminOverrides.length > 0) {
         // Build a map of transaction_id -> latest override
@@ -106,10 +116,13 @@ const TransactionHistory = () => {
           }
         }
 
+        console.log("[TransactionHistory] Override map entries:", Array.from(overrideMap.entries()).map(([id, changes]) => ({ id: id.slice(0, 8), newStatus: changes.status })));
+
         // Apply overrides to transactions
         allTransactions = allTransactions.map((txn) => {
           const override = overrideMap.get(txn.id);
           if (override) {
+            console.log(`[TransactionHistory] Applying override to txn ${txn.id.slice(0, 8)}: ${txn.status} -> ${override.status}`);
             return {
               ...txn,
               status: override.status || txn.status,
@@ -129,11 +142,14 @@ const TransactionHistory = () => {
         return dateB - dateA;
       });
 
+      console.log("[TransactionHistory] Final transactions count:", allTransactions.length);
+      console.log("[TransactionHistory] All statuses:", allTransactions.map(t => ({ id: t.id.slice(0, 8), status: t.status })));
+
       setTransactions(allTransactions);
       setFilteredTransactions(allTransactions);
       setLoading(false);
     } catch (error) {
-      console.error("Error loading transactions:", error);
+      console.error("[TransactionHistory] Error loading transactions:", error);
       setLoading(false);
     }
   };
