@@ -31,6 +31,7 @@ interface Transaction {
   recipient: string | null;
   status: string | null;
   created_at: string | null;
+  source_table?: string;
 }
 
 export const EditTransactions = () => {
@@ -70,27 +71,65 @@ export const EditTransactions = () => {
   };
 
   const loadUserTransactions = async (userId: string) => {
-    // Get user's accounts first
-    const { data: accounts } = await supabase
+    let allTransactions: Transaction[] = [];
+
+    // Try fetching via accounts -> transactions
+    const { data: accounts, error: accountsError } = await supabase
       .from("accounts")
       .select("id")
       .eq("user_id", userId);
 
-    if (!accounts || accounts.length === 0) {
-      setTransactions([]);
-      return;
+    if (accountsError) {
+      console.warn("Could not fetch accounts (likely RLS):", accountsError.message);
     }
 
-    const accountIds = accounts.map(acc => acc.id);
+    if (accounts && accounts.length > 0) {
+      const accountIds = accounts.map(acc => acc.id);
+      const { data: txns, error: txnError } = await supabase
+        .from("transactions")
+        .select("*")
+        .in("account_id", accountIds)
+        .order("created_at", { ascending: false });
 
-    // Get transactions for these accounts
-    const { data } = await supabase
-      .from("transactions")
+      if (txnError) {
+        console.warn("Could not fetch transactions:", txnError.message);
+      } else if (txns) {
+        allTransactions = txns.map(t => ({ ...t, source_table: "transactions" }));
+      }
+    }
+
+    // Also fetch from transfers table as fallback/supplement
+    const { data: transfers, error: transfersError } = await supabase
+      .from("transfers")
       .select("*")
-      .in("account_id", accountIds)
+      .eq("user_id", userId)
       .order("created_at", { ascending: false });
 
-    setTransactions(data || []);
+    if (transfersError) {
+      console.warn("Could not fetch transfers:", transfersError.message);
+    } else if (transfers && transfers.length > 0) {
+      const mappedTransfers: Transaction[] = transfers.map(t => ({
+        id: t.id,
+        account_id: "",
+        amount: t.amount,
+        description: `${t.transfer_type} to ${t.recipient_name}`,
+        transaction_type: "debit",
+        recipient: t.recipient_name,
+        status: t.status,
+        created_at: t.created_at,
+        source_table: "transfers",
+      }));
+      allTransactions = [...allTransactions, ...mappedTransfers];
+    }
+
+    // Sort by date descending
+    allTransactions.sort((a, b) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return dateB - dateA;
+    });
+
+    setTransactions(allTransactions);
   };
 
   const openEditDialog = (transaction: Transaction) => {
@@ -108,15 +147,26 @@ export const EditTransactions = () => {
 
     setLoading(true);
     try {
+      const tableName = editingTransaction.source_table === "transfers" ? "transfers" : "transactions";
+
+      const updateData = tableName === "transfers"
+        ? {
+            amount: parseFloat(editAmount),
+            recipient_name: editRecipient,
+            created_at: new Date(editDateTime).toISOString(),
+            status: editStatus,
+          }
+        : {
+            amount: parseFloat(editAmount),
+            description: editDescription,
+            recipient: editRecipient,
+            created_at: new Date(editDateTime).toISOString(),
+            status: editStatus,
+          };
+
       const { error } = await supabase
-        .from("transactions")
-        .update({
-          amount: parseFloat(editAmount),
-          description: editDescription,
-          recipient: editRecipient,
-          created_at: new Date(editDateTime).toISOString(),
-          status: editStatus,
-        })
+        .from(tableName)
+        .update(updateData)
         .eq("id", editingTransaction.id);
 
       if (error) throw error;
@@ -130,6 +180,7 @@ export const EditTransactions = () => {
           target_user_id: selectedUser,
           details: {
             transaction_id: editingTransaction.id,
+            source_table: tableName,
             changes: {
               amount: parseFloat(editAmount),
               description: editDescription,
@@ -160,15 +211,17 @@ export const EditTransactions = () => {
     }
   };
 
-  const handleDeleteTransaction = async (transactionId: string) => {
+  const handleDeleteTransaction = async (transaction: Transaction) => {
     if (!confirm("Are you sure you want to delete this transaction?")) return;
 
     setLoading(true);
     try {
+      const tableName = transaction.source_table === "transfers" ? "transfers" : "transactions";
+
       const { error } = await supabase
-        .from("transactions")
+        .from(tableName)
         .delete()
-        .eq("id", transactionId);
+        .eq("id", transaction.id);
 
       if (error) throw error;
 
@@ -179,7 +232,7 @@ export const EditTransactions = () => {
           admin_id: user.id,
           action_type: "delete_transaction",
           target_user_id: selectedUser,
-          details: { transaction_id: transactionId },
+          details: { transaction_id: transaction.id, source_table: tableName },
         });
       }
 
@@ -296,7 +349,7 @@ export const EditTransactions = () => {
                       <Button
                         variant="destructive"
                         size="sm"
-                        onClick={() => handleDeleteTransaction(transaction.id)}
+                        onClick={() => handleDeleteTransaction(transaction)}
                         disabled={loading}
                       >
                         <Trash2 className="h-4 w-4" />
