@@ -180,13 +180,20 @@ export const EditTransactions = () => {
 
     try {
       const tableName = editingTransaction.source_table || "transactions";
-      const updateData = {
+      
+      // Build update data based on table schema
+      let updateData: any = {
         amount: parseFloat(editAmount),
-        description: editDescription,
-        recipient: editRecipient,
-        created_at: editDateTime ? new Date(editDateTime).toISOString() : editingTransaction.created_at,
         status: editStatus,
       };
+
+      if (tableName === "transfers") {
+        // transfers table has: recipient_name, recipient_account, recipient_bank, recipient_country
+        updateData.recipient_name = editRecipient;
+      } else {
+        // transactions table has: description
+        updateData.description = editDescription;
+      }
 
       const { data, error } = await supabase
         .from(tableName as any)
