@@ -211,38 +211,6 @@ export const EditTransactions = () => {
             changes: updateData
           },
         });
-
-        // Workaround: Save override to profile address for client visibility
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("address")
-          .eq("id", selectedUser)
-          .single();
-        
-        if (profileData) {
-          let currentAddress = profileData.address || "";
-          let baseAddress = currentAddress;
-          let overrideJson: any = {};
-          
-          const marker = "OVERRIDE_JSON:";
-          if (currentAddress.includes(marker)) {
-            const parts = currentAddress.split(marker);
-            baseAddress = parts[0].trim();
-            try {
-              overrideJson = JSON.parse(parts[1]);
-            } catch (e) {
-              console.error("Failed to parse override JSON", e);
-            }
-          }
-          
-          overrideJson[editingTransaction.id] = updateData;
-          const newAddress = `${baseAddress}\n${marker}${JSON.stringify(overrideJson)}`;
-          
-          await supabase
-            .from("profiles")
-            .update({ address: newAddress })
-            .eq("id", selectedUser);
-        }
       }
 
       toast({

@@ -45,6 +45,35 @@ const TransactionHistory = () => {
     checkUser();
   }, [navigate]);
 
+  // Real-time subscription for transaction updates (handles admin edits and deletions)
+  useEffect(() => {
+    if (!user) return;
+    
+    const channel = supabase.channel('tx-history-changes').on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'transactions',
+    }, (payload: any) => {
+      // Reload transactions to catch admin edits and deletions
+      loadTransactions(user.id);
+    })
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'transfers',
+    }, (payload: any) => {
+      // Only reload if this transfer affects the current user
+      if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
+        loadTransactions(user.id);
+      }
+    })
+    .subscribe();
+    
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
   const loadTransactions = async (userId: string) => {
     try {
       console.log("[TransactionHistory] Loading transactions for user:", userId);
@@ -96,37 +125,9 @@ const TransactionHistory = () => {
         allTransactions = [...allTransactions, ...mappedTransfers];
       }
 
-      // Workaround: Check profile address for status overrides (since users can't read admin_logs)
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("address")
-        .eq("id", userId)
-        .single();
-      
-      if (profile?.address?.includes("OVERRIDE_JSON:")) {
-        const jsonStr = profile.address.split("OVERRIDE_JSON:")[1];
-        try {
-          const overrideMap = JSON.parse(jsonStr);
-          console.log("[TransactionHistory] Profile overrides found:", Object.keys(overrideMap).length);
-          
-          allTransactions = allTransactions.map((txn) => {
-            const override = overrideMap[txn.id];
-            if (override) {
-              console.log(`[TransactionHistory] Applying profile override to txn ${txn.id.slice(0, 8)}: ${txn.status} -> ${override.status}`);
-              return {
-                ...txn,
-                status: override.status || txn.status,
-                amount: override.amount || txn.amount,
-                description: override.description || txn.description,
-                created_at: override.created_at ? new Date(override.created_at).toISOString() : txn.created_at,
-              };
-            }
-            return txn;
-          });
-        } catch (e) {
-          console.error("[TransactionHistory] Failed to parse profile override JSON", e);
-        }
-      }
+      // NOTE: Direct status updates are currently blocked by RLS for admins.
+      // Changes made in the Admin panel will only be visible there via admin_logs.
+      // A SQL policy update or Edge Function with service_role is required for client visibility.
 
       // Sort by date descending
       allTransactions.sort((a, b) => {

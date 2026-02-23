@@ -26,7 +26,6 @@ const Profile = () => {
     age: "",
     profile_picture_url: ""
   });
-  const [hiddenData, setHiddenData] = useState("");
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -44,23 +43,12 @@ const Profile = () => {
         .single();
 
       if (data) {
-        let rawAddress = data.address || "";
-        let cleanAddress = rawAddress;
-        let hidden = "";
-        
-        if (rawAddress.includes("OVERRIDE_JSON:")) {
-          const parts = rawAddress.split("OVERRIDE_JSON:");
-          cleanAddress = parts[0].trim();
-          hidden = "OVERRIDE_JSON:" + parts[1];
-        }
-        
-        setHiddenData(hidden);
         setProfile({
           full_name: data.full_name || "",
           username: data.username || "",
           email: data.email || "",
           phone: data.phone || "",
-          address: cleanAddress,
+          address: data.address || "",
           date_of_birth: data.date_of_birth || "",
           age: data.age?.toString() || "",
           profile_picture_url: data.profile_picture_url || ""
@@ -70,16 +58,57 @@ const Profile = () => {
     loadProfile();
   }, [navigate]);
 
-  const handleSave = async () => {
-    const finalAddress = hiddenData ? `${profile.address.trim()}\n${hiddenData}` : profile.address;
+  // Real-time subscription for profile updates
+  // FIXED: Removed filter to receive admin profile updates
+  useEffect(() => {
+    if (!user) return;
+    
+    const channel = supabase.channel('profile-changes').on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'profiles',
+      // NOTE: Removed filter to receive admin updates
+    }, (payload: any) => {
+      // Only reload if this is the current user's profile
+      if (payload.new?.id === user.id || payload.old?.id === user.id) {
+        loadProfile();
+      }
+    }).subscribe();
 
+    const loadProfile = async () => {
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+
+      if (data) {
+        setProfile({
+          full_name: data.full_name || "",
+          username: data.username || "",
+          email: data.email || "",
+          phone: data.phone || "",
+          address: data.address || "",
+          date_of_birth: data.date_of_birth || "",
+          age: data.age?.toString() || "",
+          profile_picture_url: data.profile_picture_url || ""
+        });
+      }
+    };
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  const handleSave = async () => {
     const { error } = await supabase
       .from("profiles")
       .update({
         full_name: profile.full_name,
         username: profile.username,
         phone: profile.phone,
-        address: finalAddress,
+        address: profile.address,
         date_of_birth: profile.date_of_birth || null,
         age: profile.age ? parseInt(profile.age) : null,
         profile_picture_url: profile.profile_picture_url

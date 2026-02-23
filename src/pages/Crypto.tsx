@@ -69,6 +69,8 @@ const Crypto = () => {
   }, [cryptoWallets, prices]);
 
   // Real-time subscription for crypto wallet and transaction updates
+  // FIXED: Removed filters to receive all changes, then filter in code
+  // This allows admin updates to trigger real-time sync for affected users
   useEffect(() => {
     if (!user) return;
     
@@ -80,10 +82,13 @@ const Crypto = () => {
           event: '*',
           schema: 'public',
           table: 'crypto_wallets',
-          filter: `user_id=eq.${user.id}`
+          // NOTE: Removed filter to receive admin updates
         },
-        () => {
-          loadCryptoWallets(user.id);
+        (payload: any) => {
+          // Only reload if this change affects the current user
+          if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
+            loadCryptoWallets(user.id);
+          }
         }
       )
       .on(
@@ -92,10 +97,13 @@ const Crypto = () => {
           event: 'INSERT',
           schema: 'public',
           table: 'crypto_transactions',
-          filter: `user_id=eq.${user.id}`
+          // NOTE: Removed filter to receive admin updates
         },
-        () => {
-          loadTransactions(user.id);
+        (payload: any) => {
+          // Only reload if this change affects the current user
+          if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
+            loadTransactions(user.id);
+          }
         }
       )
       .subscribe();
