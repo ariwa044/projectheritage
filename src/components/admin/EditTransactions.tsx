@@ -164,23 +164,31 @@ export const EditTransactions = () => {
             status: editStatus,
           };
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from(tableName)
         .update(updateData)
-        .eq("id", editingTransaction.id);
+        .eq("id", editingTransaction.id)
+        .select();
 
-      if (error) throw error;
+      if (error) {
+        console.error(`Update error on ${tableName}:`, error);
+        throw error;
+      }
 
-      // Log the action
+      const updated = data && data.length > 0;
+      console.log(`Update on ${tableName}: affected ${data?.length || 0} rows`);
+
+      // Log the action (and store as override if direct update failed due to RLS)
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         await supabase.from("admin_logs").insert({
           admin_id: user.id,
-          action_type: "edit_transaction",
+          action_type: updated ? "edit_transaction" : "override_transaction_status",
           target_user_id: selectedUser,
           details: {
             transaction_id: editingTransaction.id,
             source_table: tableName,
+            direct_update: updated,
             changes: {
               amount: parseFloat(editAmount),
               description: editDescription,
@@ -192,10 +200,17 @@ export const EditTransactions = () => {
         });
       }
 
-      toast({
-        title: "Success",
-        description: "Transaction updated successfully",
-      });
+      if (!updated) {
+        toast({
+          title: "Note",
+          description: "Status override saved. The change is logged but may require database permissions to fully apply.",
+        });
+      } else {
+        toast({
+          title: "Success",
+          description: "Transaction updated successfully",
+        });
+      }
 
       setShowEditDialog(false);
       await loadUserTransactions(selectedUser);

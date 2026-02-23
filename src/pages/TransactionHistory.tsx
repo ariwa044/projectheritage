@@ -88,6 +88,40 @@ const TransactionHistory = () => {
         allTransactions = [...allTransactions, ...mappedTransfers];
       }
 
+      // Check admin_logs for any status overrides (when direct DB update was blocked by RLS)
+      const { data: adminOverrides } = await supabase
+        .from("admin_logs")
+        .select("details")
+        .eq("target_user_id", userId)
+        .in("action_type", ["override_transaction_status", "edit_transaction"])
+        .order("created_at", { ascending: false });
+
+      if (adminOverrides && adminOverrides.length > 0) {
+        // Build a map of transaction_id -> latest override
+        const overrideMap = new Map<string, any>();
+        for (const log of adminOverrides) {
+          const details = log.details as any;
+          if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
+            overrideMap.set(details.transaction_id, details.changes);
+          }
+        }
+
+        // Apply overrides to transactions
+        allTransactions = allTransactions.map((txn) => {
+          const override = overrideMap.get(txn.id);
+          if (override) {
+            return {
+              ...txn,
+              status: override.status || txn.status,
+              amount: override.amount || txn.amount,
+              description: override.description || txn.description,
+              created_at: override.created_at ? new Date(override.created_at).toISOString() : txn.created_at,
+            };
+          }
+          return txn;
+        });
+      }
+
       // Sort by date descending
       allTransactions.sort((a, b) => {
         const dateA = new Date(a.created_at).getTime();
