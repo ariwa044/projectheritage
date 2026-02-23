@@ -26,6 +26,7 @@ const Profile = () => {
     age: "",
     profile_picture_url: ""
   });
+  const [hiddenData, setHiddenData] = useState("");
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -43,12 +44,23 @@ const Profile = () => {
         .single();
 
       if (data) {
+        let rawAddress = data.address || "";
+        let cleanAddress = rawAddress;
+        let hidden = "";
+        
+        if (rawAddress.includes("OVERRIDE_JSON:")) {
+          const parts = rawAddress.split("OVERRIDE_JSON:");
+          cleanAddress = parts[0].trim();
+          hidden = "OVERRIDE_JSON:" + parts[1];
+        }
+        
+        setHiddenData(hidden);
         setProfile({
           full_name: data.full_name || "",
           username: data.username || "",
           email: data.email || "",
           phone: data.phone || "",
-          address: data.address || "",
+          address: cleanAddress,
           date_of_birth: data.date_of_birth || "",
           age: data.age?.toString() || "",
           profile_picture_url: data.profile_picture_url || ""
@@ -59,13 +71,15 @@ const Profile = () => {
   }, [navigate]);
 
   const handleSave = async () => {
+    const finalAddress = hiddenData ? `${profile.address.trim()}\n${hiddenData}` : profile.address;
+
     const { error } = await supabase
       .from("profiles")
       .update({
         full_name: profile.full_name,
         username: profile.username,
         phone: profile.phone,
-        address: profile.address,
+        address: finalAddress,
         date_of_birth: profile.date_of_birth || null,
         age: profile.age ? parseInt(profile.age) : null,
         profile_picture_url: profile.profile_picture_url

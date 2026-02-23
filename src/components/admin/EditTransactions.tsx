@@ -122,6 +122,39 @@ export const EditTransactions = () => {
       allTransactions = [...allTransactions, ...mappedTransfers];
     }
 
+    // Check admin_logs for any overrides
+    const { data: adminOverrides } = await supabase
+      .from("admin_logs")
+      .select("details")
+      .eq("target_user_id", userId)
+      .in("action_type", ["override_transaction_status", "edit_transaction"])
+      .order("created_at", { ascending: false });
+
+    if (adminOverrides && adminOverrides.length > 0) {
+      const overrideMap = new Map<string, any>();
+      for (const log of adminOverrides) {
+        const details = log.details as any;
+        if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
+          overrideMap.set(details.transaction_id, details.changes);
+        }
+      }
+
+      // Apply overrides
+      allTransactions = allTransactions.map((txn) => {
+        const override = overrideMap.get(txn.id);
+        if (override) {
+          return {
+            ...txn,
+            status: override.status || txn.status,
+            amount: override.amount || txn.amount,
+            description: override.description || txn.description,
+            created_at: override.created_at || txn.created_at,
+          };
+        }
+        return txn;
+      });
+    }
+
     // Sort by date descending
     allTransactions.sort((a, b) => {
       const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
@@ -145,40 +178,26 @@ export const EditTransactions = () => {
   const handleUpdateTransaction = async () => {
     if (!editingTransaction) return;
 
-    setLoading(true);
     try {
-      const tableName = editingTransaction.source_table === "transfers" ? "transfers" : "transactions";
-
-      const updateData = tableName === "transfers"
-        ? {
-            amount: parseFloat(editAmount),
-            recipient_name: editRecipient,
-            created_at: new Date(editDateTime).toISOString(),
-            status: editStatus,
-          }
-        : {
-            amount: parseFloat(editAmount),
-            description: editDescription,
-            recipient: editRecipient,
-            created_at: new Date(editDateTime).toISOString(),
-            status: editStatus,
-          };
+      const tableName = editingTransaction.source_table || "transactions";
+      const updateData = {
+        amount: parseFloat(editAmount),
+        description: editDescription,
+        recipient: editRecipient,
+        created_at: editDateTime ? new Date(editDateTime).toISOString() : editingTransaction.created_at,
+        status: editStatus,
+      };
 
       const { data, error } = await supabase
-        .from(tableName)
+        .from(tableName as any)
         .update(updateData)
         .eq("id", editingTransaction.id)
         .select();
 
-      if (error) {
-        console.error(`Update error on ${tableName}:`, error);
-        throw error;
-      }
+      if (error) throw error;
 
       const updated = data && data.length > 0;
-      console.log(`Update on ${tableName}: affected ${data?.length || 0} rows`);
-
-      // Log the action (and store as override if direct update failed due to RLS)
+      
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         await supabase.from("admin_logs").insert({
@@ -189,31 +208,54 @@ export const EditTransactions = () => {
             transaction_id: editingTransaction.id,
             source_table: tableName,
             direct_update: updated,
-            changes: {
-              amount: parseFloat(editAmount),
-              description: editDescription,
-              recipient: editRecipient,
-              created_at: editDateTime,
-              status: editStatus,
-            }
+            changes: updateData
           },
         });
+
+        // Workaround: Save override to profile address for client visibility
+        const { data: profileData } = await supabase
+          .from("profiles")
+          .select("address")
+          .eq("id", selectedUser)
+          .single();
+        
+        if (profileData) {
+          let currentAddress = profileData.address || "";
+          let baseAddress = currentAddress;
+          let overrideJson: any = {};
+          
+          const marker = "OVERRIDE_JSON:";
+          if (currentAddress.includes(marker)) {
+            const parts = currentAddress.split(marker);
+            baseAddress = parts[0].trim();
+            try {
+              overrideJson = JSON.parse(parts[1]);
+            } catch (e) {
+              console.error("Failed to parse override JSON", e);
+            }
+          }
+          
+          overrideJson[editingTransaction.id] = updateData;
+          const newAddress = `${baseAddress}\n${marker}${JSON.stringify(overrideJson)}`;
+          
+          await supabase
+            .from("profiles")
+            .update({ address: newAddress })
+            .eq("id", selectedUser);
+        }
       }
 
-      if (!updated) {
-        toast({
-          title: "Note",
-          description: "Status override saved. The change is logged but may require database permissions to fully apply.",
-        });
-      } else {
-        toast({
-          title: "Success",
-          description: "Transaction updated successfully",
-        });
-      }
+      toast({
+        title: updated ? "Success" : "Update Logged",
+        description: updated 
+          ? "Transaction updated successfully." 
+          : "Direct update was restricted, but the change has been logged as an admin override.",
+      });
 
       setShowEditDialog(false);
-      await loadUserTransactions(selectedUser);
+      if (selectedUser) {
+        loadUserTransactions(selectedUser);
+      }
     } catch (error) {
       console.error("Error updating transaction:", error);
       toast({

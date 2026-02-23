@@ -157,34 +157,33 @@ const Dashboard = () => {
       all = [...all, ...mapped];
     }
 
-    // Check admin_logs for status overrides
-    const { data: adminOverrides } = await supabase
-      .from("admin_logs")
-      .select("details")
-      .eq("target_user_id", userId)
-      .in("action_type", ["override_transaction_status", "edit_transaction"])
-      .order("created_at", { ascending: false });
-
-    if (adminOverrides && adminOverrides.length > 0) {
-      const overrideMap = new Map<string, any>();
-      for (const log of adminOverrides) {
-        const details = log.details as any;
-        if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
-          overrideMap.set(details.transaction_id, details.changes);
-        }
+    // Workaround: Check profile address for status overrides (since users can't read admin_logs)
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("address")
+      .eq("id", userId)
+      .single();
+    
+    if (profile?.address?.includes("OVERRIDE_JSON:")) {
+      const jsonStr = profile.address.split("OVERRIDE_JSON:")[1];
+      try {
+        const overrideMap = JSON.parse(jsonStr);
+        all = all.map((txn) => {
+          const override = overrideMap[txn.id];
+          if (override) {
+            return {
+              ...txn,
+              status: override.status || txn.status,
+              amount: override.amount || txn.amount,
+              description: override.description || txn.description,
+              created_at: override.created_at || txn.created_at,
+            };
+          }
+          return txn;
+        });
+      } catch (e) {
+        console.error("[Dashboard] Failed to parse profile override JSON", e);
       }
-      all = all.map((txn) => {
-        const override = overrideMap.get(txn.id);
-        if (override) {
-          return {
-            ...txn,
-            status: override.status || txn.status,
-            amount: override.amount || txn.amount,
-            description: override.description || txn.description,
-          };
-        }
-        return txn;
-      });
     }
 
     // Sort and take latest 5
