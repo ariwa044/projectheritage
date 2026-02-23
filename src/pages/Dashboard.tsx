@@ -6,9 +6,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Wallet, ArrowUpRight, ArrowDownRight, CreditCard, TrendingUp, FileText, Smartphone, Shield, Clock, DollarSign, Send } from "lucide-react";
+import { Wallet, ArrowUpRight, ArrowDownRight, CreditCard, TrendingUp, FileText, Smartphone, Shield, Clock, DollarSign, Send, ArrowUpCircle, ArrowDownCircle } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import { QuickSendMoney } from "@/components/QuickSendMoney";
+import { format } from "date-fns";
+
 interface Account {
   id: string;
   account_type: string;
@@ -17,6 +19,16 @@ interface Account {
   currency: string;
   status: string;
 }
+
+interface RecentTransaction {
+  id: string;
+  amount: number;
+  transaction_type: string;
+  description: string;
+  status: string;
+  created_at: string;
+}
+
 const Dashboard = () => {
   const navigate = useNavigate();
   const [user, setUser] = useState<User | null>(null);
@@ -25,6 +37,8 @@ const Dashboard = () => {
   const [profileName, setProfileName] = useState<string>("");
   const [isCardFlipped, setIsCardFlipped] = useState(false);
   const [cvv] = useState(() => Math.floor(100 + Math.random() * 900).toString());
+  const [recentTransactions, setRecentTransactions] = useState<RecentTransaction[]>([]);
+
   useEffect(() => {
     const checkUser = async () => {
       const {
@@ -48,6 +62,9 @@ const Dashboard = () => {
 
       // Load accounts
       await loadAccounts(session.user.id);
+      
+      // Load recent transactions
+      await loadRecentTransactions(session.user.id);
       
       if (profile) {
         setProfileName(profile.full_name || `${profile.first_name} ${profile.last_name}` || "User");
@@ -86,6 +103,7 @@ const Dashboard = () => {
       supabase.removeChannel(channel);
     };
   }, [user]);
+
   const loadAccounts = async (userId: string) => {
     const {
       data,
@@ -95,15 +113,66 @@ const Dashboard = () => {
       setAccounts(data as Account[]);
     }
   };
+
+  const loadRecentTransactions = async (userId: string) => {
+    let all: RecentTransaction[] = [];
+
+    // From transactions table
+    const { data: accs } = await supabase.from("accounts").select("id").eq("user_id", userId);
+    if (accs && accs.length > 0) {
+      const { data: txns } = await supabase
+        .from("transactions")
+        .select("*")
+        .in("account_id", accs.map(a => a.id))
+        .order("created_at", { ascending: false })
+        .limit(5);
+      if (txns) {
+        all = txns.map(t => ({
+          id: t.id,
+          amount: t.amount,
+          transaction_type: t.transaction_type,
+          description: t.description || t.transaction_type,
+          status: t.status || "completed",
+          created_at: t.created_at,
+        }));
+      }
+    }
+
+    // From transfers table
+    const { data: transfers } = await supabase
+      .from("transfers")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(5);
+    if (transfers) {
+      const mapped = transfers.map(t => ({
+        id: t.id,
+        amount: t.amount,
+        transaction_type: "debit",
+        description: `${t.transfer_type} transfer to ${t.recipient_name}`,
+        status: t.status,
+        created_at: t.created_at,
+      }));
+      all = [...all, ...mapped];
+    }
+
+    // Sort and take latest 5
+    all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    setRecentTransactions(all.slice(0, 5));
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     navigate("/");
   };
+
   if (loading) {
     return <div className="min-h-screen bg-primary flex items-center justify-center">
         <div className="text-foreground">Loading...</div>
       </div>;
   }
+
   return <div className="min-h-screen bg-primary">
       <Navbar />
       <div className="pt-24 pb-12">
@@ -177,7 +246,37 @@ const Dashboard = () => {
 
               <Card className="p-6 bg-card border-border">
                 <h2 className="text-2xl font-bold text-foreground mb-4">Recent Activity</h2>
-                <p className="text-muted-foreground">No recent transactions</p>
+                {recentTransactions.length === 0 ? (
+                  <p className="text-muted-foreground">No recent transactions</p>
+                ) : (
+                  <div className="space-y-3">
+                    {recentTransactions.map((txn) => (
+                      <div key={txn.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-accent/5 transition-colors cursor-pointer" onClick={() => navigate("/transactions")}>
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${txn.transaction_type === 'debit' || txn.transaction_type === 'transfer' ? 'bg-destructive/10' : 'bg-green-500/10'}`}>
+                            {txn.transaction_type === 'debit' || txn.transaction_type === 'transfer' ? (
+                              <ArrowUpCircle className="w-4 h-4 text-destructive" />
+                            ) : (
+                              <ArrowDownCircle className="w-4 h-4 text-green-500" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium text-foreground">{txn.description}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {format(new Date(txn.created_at), 'MMM d, yyyy • h:mm a')}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className={`text-sm font-bold ${txn.transaction_type === 'debit' || txn.transaction_type === 'transfer' ? 'text-destructive' : 'text-green-500'}`}>
+                            {txn.transaction_type === 'debit' || txn.transaction_type === 'transfer' ? '-' : '+'}${txn.amount.toFixed(2)}
+                          </p>
+                          <p className="text-xs text-muted-foreground capitalize">{txn.status}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </Card>
             </TabsContent>
 

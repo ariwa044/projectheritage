@@ -47,28 +47,56 @@ const TransactionHistory = () => {
 
   const loadTransactions = async (userId: string) => {
     try {
+      let allTransactions: Transaction[] = [];
+
+      // Fetch from transactions table via accounts
       const { data: accounts } = await supabase
         .from("accounts")
         .select("id")
         .eq("user_id", userId);
 
-      if (!accounts || accounts.length === 0) {
-        setLoading(false);
-        return;
+      if (accounts && accounts.length > 0) {
+        const accountIds = accounts.map((acc) => acc.id);
+        const { data: txns } = await supabase
+          .from("transactions")
+          .select("*")
+          .in("account_id", accountIds)
+          .order("created_at", { ascending: false });
+
+        if (txns) {
+          allTransactions = txns;
+        }
       }
 
-      const accountIds = accounts.map((acc) => acc.id);
-
-      const { data, error } = await supabase
-        .from("transactions")
+      // Also fetch from transfers table (admin edits update this table)
+      const { data: transfers } = await supabase
+        .from("transfers")
         .select("*")
-        .in("account_id", accountIds)
+        .eq("user_id", userId)
         .order("created_at", { ascending: false });
 
-      if (error) throw error;
-      
-      setTransactions(data || []);
-      setFilteredTransactions(data || []);
+      if (transfers && transfers.length > 0) {
+        const mappedTransfers: Transaction[] = transfers.map((t) => ({
+          id: t.id,
+          amount: t.amount,
+          transaction_type: "debit",
+          description: `${t.transfer_type} transfer to ${t.recipient_name}`,
+          recipient: t.recipient_name,
+          status: t.status,
+          created_at: t.created_at,
+        }));
+        allTransactions = [...allTransactions, ...mappedTransfers];
+      }
+
+      // Sort by date descending
+      allTransactions.sort((a, b) => {
+        const dateA = new Date(a.created_at).getTime();
+        const dateB = new Date(b.created_at).getTime();
+        return dateB - dateA;
+      });
+
+      setTransactions(allTransactions);
+      setFilteredTransactions(allTransactions);
       setLoading(false);
     } catch (error) {
       console.error("Error loading transactions:", error);
