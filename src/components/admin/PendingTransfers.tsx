@@ -27,16 +27,35 @@ export const PendingTransfers = () => {
   }, []);
 
   const loadPendingTransfers = async () => {
-    const { data } = await supabase
+    // Fetch transfers without FK join (no FK exists in the schema)
+    const { data: transfersData } = await supabase
       .from("transfers")
-      .select(`
-        *,
-        profiles!transfers_user_id_fkey(full_name, email)
-      `)
+      .select("*")
       .eq("status", "pending")
       .order("created_at", { ascending: false });
 
-    setTransfers(data || []);
+    if (!transfersData || transfersData.length === 0) {
+      setTransfers([]);
+      return;
+    }
+
+    // Get unique user IDs and fetch their profiles separately
+    const userIds = [...new Set(transfersData.map((t) => t.user_id))];
+    const { data: profilesData } = await supabase
+      .from("profiles")
+      .select("id, full_name, email")
+      .in("id", userIds);
+
+    // Merge profiles into transfers
+    const profileMap = new Map(
+      (profilesData || []).map((p) => [p.id, p])
+    );
+    const merged = transfersData.map((t) => ({
+      ...t,
+      profiles: profileMap.get(t.user_id) || null,
+    }));
+
+    setTransfers(merged);
   };
 
   const approveTransfer = async (transfer: any) => {
