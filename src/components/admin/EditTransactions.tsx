@@ -73,22 +73,68 @@ export const EditTransactions = () => {
   const loadUserTransactions = async (userId: string) => {
     let allTransactions: Transaction[] = [];
 
-    // Directly query transactions and filter by the related account's user_id
-    // This avoids the issue where fetching from 'accounts' first returns empty due to some RLS rules
-    const { data: txns, error: txnError } = await supabase
-      .from("transactions")
-      .select("*, accounts!inner(user_id)")
-      .eq("accounts.user_id", userId)
+    // Try fetching via accounts -> transactions
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("id")
+      .eq("user_id", userId);
+
+    if (accounts && accounts.length > 0) {
+      const accountIds = accounts.map(acc => acc.id);
+      const { data: txns } = await supabase
+        .from("transactions")
+        .select("*")
+        .in("account_id", accountIds)
+        .order("created_at", { ascending: false });
+
+      if (txns) {
+        allTransactions = txns.map(t => ({ 
+          ...t, 
+          source_table: "transactions" 
+        }));
+      }
+    }
+
+    // Also fetch from transfers table as fallback/supplement (admin definitely has RLS access here)
+    const { data: transfers, error: transfersError } = await supabase
+      .from("transfers")
+      .select("*")
+      .eq("user_id", userId)
       .order("created_at", { ascending: false });
 
-    if (txnError) {
-      console.warn("Could not fetch transactions:", txnError.message);
-    } else if (txns) {
-      allTransactions = txns.map(t => ({ 
-        ...t, 
-        source_table: "transactions" 
+    if (transfersError) {
+      console.warn("Could not fetch transfers:", transfersError.message);
+    } else if (transfers && transfers.length > 0) {
+      const mappedTransfers: Transaction[] = transfers.map(t => ({
+        id: t.id,
+        account_id: "",
+        amount: t.amount,
+        description: `${t.transfer_type} to ${t.recipient_name}`,
+        transaction_type: "debit",
+        recipient: t.recipient_name,
+        status: t.status,
+        created_at: t.created_at,
+        source_table: "transfers",
       }));
+      
+      // Deduplicate: If an admin can see both 'transactions' and 'transfers', 
+      // don't show the same transfer twice. We match by amount and recipient.
+      for (const mt of mappedTransfers) {
+        const existsInTransactions = allTransactions.some(
+          t => t.amount === mt.amount && t.recipient === mt.recipient
+        );
+        if (!existsInTransactions) {
+          allTransactions.push(mt);
+        }
+      }
     }
+
+    // Sort by date descending
+    allTransactions.sort((a, b) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return dateB - dateA;
+    });
 
     setTransactions(allTransactions);
   };
