@@ -98,37 +98,6 @@ export const EditTransactions = () => {
       }
     }
 
-    // Also fetch from transfers table as fallback/supplement
-    const { data: transfers, error: transfersError } = await supabase
-      .from("transfers")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false });
-
-    if (transfersError) {
-      console.warn("Could not fetch transfers:", transfersError.message);
-    } else if (transfers && transfers.length > 0) {
-      const mappedTransfers: Transaction[] = transfers.map(t => ({
-        id: t.id,
-        account_id: "",
-        amount: t.amount,
-        description: `${t.transfer_type} to ${t.recipient_name}`,
-        transaction_type: "debit",
-        recipient: t.recipient_name,
-        status: t.status,
-        created_at: t.created_at,
-        source_table: "transfers",
-      }));
-      allTransactions = [...allTransactions, ...mappedTransfers];
-    }
-
-    // Sort by date descending
-    allTransactions.sort((a, b) => {
-      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
-      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
-      return dateB - dateA;
-    });
-
     setTransactions(allTransactions);
   };
 
@@ -147,7 +116,6 @@ export const EditTransactions = () => {
 
     setLoading(true);
     try {
-      const tableName = editingTransaction.source_table === "transfers" ? "transfers" : "transactions";
       const { data: { user } } = await supabase.auth.getUser();
 
       if (!user) {
@@ -156,125 +124,62 @@ export const EditTransactions = () => {
 
       let success = false;
 
-      if (tableName === "transfers") {
-        // === UPDATE THE TRANSFERS TABLE (direct update — admin has UPDATE policy) ===
-        const { data, error } = await supabase
+      // Delete + insert on transactions — no admin UPDATE policy
+      console.log("[EditTransactions] Using delete+insert for transactions table");
+
+      const { error: deleteError } = await supabase
+        .from("transactions")
+        .delete()
+        .eq("id", editingTransaction.id);
+
+      if (deleteError) {
+        console.error("[EditTransactions] Delete error:", deleteError);
+        throw deleteError;
+      }
+
+      const { data: newTxn, error: insertError } = await supabase
+        .from("transactions")
+        .insert({
+          account_id: editingTransaction.account_id,
+          transaction_type: editingTransaction.transaction_type,
+          amount: parseFloat(editAmount),
+          description: editDescription,
+          recipient: editRecipient,
+          created_at: new Date(editDateTime).toISOString(),
+          status: editStatus,
+        })
+        .select();
+
+      if (insertError) {
+        console.error("[EditTransactions] Insert error:", insertError);
+        throw insertError;
+      }
+
+      success = newTxn && newTxn.length > 0;
+      console.log(`[EditTransactions] Delete+Insert: new record created`);
+
+      // Also sync the matching transfers record (frontend-level sync)
+      if (selectedUser) {
+        const { data: matchingTransfers } = await supabase
           .from("transfers")
-          .update({
-            amount: parseFloat(editAmount),
-            recipient_name: editRecipient,
-            created_at: new Date(editDateTime).toISOString(),
-            status: editStatus,
-          })
-          .eq("id", editingTransaction.id)
-          .select();
+          .select("*")
+          .eq("user_id", selectedUser)
+          .eq("amount", editingTransaction.amount)
+          .ilike("recipient_name", editingTransaction.recipient || "");
 
-        if (error) {
-          console.error("[EditTransactions] Update transfers error:", error);
-          throw error;
-        }
-
-        success = data && data.length > 0;
-        console.log(`[EditTransactions] Transfer update: affected ${data?.length || 0} rows`);
-
-        // === ALSO UPDATE THE MATCHING TRANSACTIONS RECORD ===
-        // Transfers also create a record in the transactions table, sync it too
-        if (selectedUser) {
-          const { data: accounts } = await supabase
-            .from("accounts")
-            .select("id")
-            .eq("user_id", selectedUser);
-
-          if (accounts && accounts.length > 0) {
-            const accountIds = accounts.map(a => a.id);
-            // Find matching transaction by recipient name + similar amount
-            const { data: matchingTxns } = await supabase
-              .from("transactions")
-              .select("*")
-              .in("account_id", accountIds)
-              .eq("amount", editingTransaction.amount)
-              .ilike("recipient", editingTransaction.recipient || "");
-
-            if (matchingTxns && matchingTxns.length > 0) {
-              const matchTxn = matchingTxns[0];
-              console.log(`[EditTransactions] Found matching transactions record: ${matchTxn.id}`);
-              
-              // Delete old + insert new (no admin UPDATE policy on transactions)
-              await supabase.from("transactions").delete().eq("id", matchTxn.id);
-              await supabase.from("transactions").insert({
-                account_id: matchTxn.account_id,
-                transaction_type: matchTxn.transaction_type,
-                amount: parseFloat(editAmount),
-                description: editDescription || matchTxn.description,
-                recipient: editRecipient,
-                created_at: new Date(editDateTime).toISOString(),
-                status: editStatus,
-              });
-              console.log("[EditTransactions] Synced matching transactions record");
-            }
-          }
-        }
-      } else {
-        // === UPDATE THE TRANSACTIONS TABLE (delete + insert — no admin UPDATE policy) ===
-        console.log("[EditTransactions] Using delete+insert for transactions table");
-
-        const { error: deleteError } = await supabase
-          .from("transactions")
-          .delete()
-          .eq("id", editingTransaction.id);
-
-        if (deleteError) {
-          console.error("[EditTransactions] Delete error:", deleteError);
-          throw deleteError;
-        }
-
-        const { data: newTxn, error: insertError } = await supabase
-          .from("transactions")
-          .insert({
-            account_id: editingTransaction.account_id,
-            transaction_type: editingTransaction.transaction_type,
-            amount: parseFloat(editAmount),
-            description: editDescription,
-            recipient: editRecipient,
-            created_at: new Date(editDateTime).toISOString(),
-            status: editStatus,
-          })
-          .select();
-
-        if (insertError) {
-          console.error("[EditTransactions] Insert error:", insertError);
-          throw insertError;
-        }
-
-        success = newTxn && newTxn.length > 0;
-        console.log(`[EditTransactions] Delete+Insert: new record created`, newTxn);
-
-        // === ALSO UPDATE THE MATCHING TRANSFERS RECORD ===
-        // Find matching transfer by user + recipient + amount
-        if (selectedUser) {
-          const { data: matchingTransfers } = await supabase
+        if (matchingTransfers && matchingTransfers.length > 0) {
+          const matchTransfer = matchingTransfers[0];
+          console.log(`[EditTransactions] Syncing matching transfers record: ${matchTransfer.id}`);
+          // Direct update (admin has UPDATE policy on transfers)
+          await supabase
             .from("transfers")
-            .select("*")
-            .eq("user_id", selectedUser)
-            .eq("amount", editingTransaction.amount)
-            .ilike("recipient_name", editingTransaction.recipient || "");
-
-          if (matchingTransfers && matchingTransfers.length > 0) {
-            const matchTransfer = matchingTransfers[0];
-            console.log(`[EditTransactions] Found matching transfers record: ${matchTransfer.id}`);
-            
-            // Direct update (admin has UPDATE policy on transfers)
-            await supabase
-              .from("transfers")
-              .update({
-                amount: parseFloat(editAmount),
-                recipient_name: editRecipient,
-                created_at: new Date(editDateTime).toISOString(),
-                status: editStatus,
-              })
-              .eq("id", matchTransfer.id);
-            console.log("[EditTransactions] Synced matching transfers record");
-          }
+            .update({
+              amount: parseFloat(editAmount),
+              recipient_name: editRecipient,
+              created_at: new Date(editDateTime).toISOString(),
+              status: editStatus,
+            })
+            .eq("id", matchTransfer.id);
         }
       }
 
@@ -285,7 +190,7 @@ export const EditTransactions = () => {
         target_user_id: selectedUser,
         details: {
           transaction_id: editingTransaction.id,
-          source_table: tableName,
+          source_table: "transactions",
           synced_both_tables: true,
           changes: {
             amount: parseFloat(editAmount),
@@ -328,10 +233,8 @@ export const EditTransactions = () => {
 
     setLoading(true);
     try {
-      const tableName = transaction.source_table === "transfers" ? "transfers" : "transactions";
-
       const { error } = await supabase
-        .from(tableName)
+        .from("transactions")
         .delete()
         .eq("id", transaction.id);
 
@@ -344,7 +247,7 @@ export const EditTransactions = () => {
           admin_id: user.id,
           action_type: "delete_transaction",
           target_user_id: selectedUser,
-          details: { transaction_id: transaction.id, source_table: tableName },
+          details: { transaction_id: transaction.id, source_table: "transactions" },
         });
       }
 
