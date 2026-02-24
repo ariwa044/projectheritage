@@ -73,29 +73,21 @@ export const EditTransactions = () => {
   const loadUserTransactions = async (userId: string) => {
     let allTransactions: Transaction[] = [];
 
-    // Try fetching via accounts -> transactions
-    const { data: accounts, error: accountsError } = await supabase
-      .from("accounts")
-      .select("id")
-      .eq("user_id", userId);
+    // Directly query transactions and filter by the related account's user_id
+    // This avoids the issue where fetching from 'accounts' first returns empty due to some RLS rules
+    const { data: txns, error: txnError } = await supabase
+      .from("transactions")
+      .select("*, accounts!inner(user_id)")
+      .eq("accounts.user_id", userId)
+      .order("created_at", { ascending: false });
 
-    if (accountsError) {
-      console.warn("Could not fetch accounts (likely RLS):", accountsError.message);
-    }
-
-    if (accounts && accounts.length > 0) {
-      const accountIds = accounts.map(acc => acc.id);
-      const { data: txns, error: txnError } = await supabase
-        .from("transactions")
-        .select("*")
-        .in("account_id", accountIds)
-        .order("created_at", { ascending: false });
-
-      if (txnError) {
-        console.warn("Could not fetch transactions:", txnError.message);
-      } else if (txns) {
-        allTransactions = txns.map(t => ({ ...t, source_table: "transactions" }));
-      }
+    if (txnError) {
+      console.warn("Could not fetch transactions:", txnError.message);
+    } else if (txns) {
+      allTransactions = txns.map(t => ({ 
+        ...t, 
+        source_table: "transactions" 
+      }));
     }
 
     setTransactions(allTransactions);
