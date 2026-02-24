@@ -150,7 +150,7 @@ export const EditTransactions = () => {
   };
 
   const handleUpdateTransaction = async () => {
-    if (!editingTransaction) return;
+    if (!editingTransaction || !selectedUser) return;
 
     setLoading(true);
     try {
@@ -161,75 +161,45 @@ export const EditTransactions = () => {
       }
 
       let success = false;
-      let targetAccountId = editingTransaction.account_id;
+      const updates = {
+        amount: parseFloat(editAmount),
+        description: editDescription,
+        recipient: editRecipient,
+        created_at: new Date(editDateTime).toISOString(),
+        status: editStatus,
+      };
 
-      // If this record came from the transfers table fallback, it might have an empty account_id.
-      // We must look up the correct account_id for this user before inserting into transactions.
-      if (!targetAccountId && selectedUser) {
-        const { data: userAccounts } = await supabase
-          .from("accounts")
-          .select("id")
-          .eq("user_id", selectedUser)
-          .limit(1);
-          
-        if (userAccounts && userAccounts.length > 0) {
-          targetAccountId = userAccounts[0].id;
-        } else {
-          throw new Error("Could not find an account for this user to attach the transaction to.");
-        }
-      }
-
-      // Delete + insert on transactions — no admin UPDATE policy
-      console.log("[EditTransactions] Using delete+insert for transactions table");
-
-      // Only attempt delete if this record actually came from the transactions table
-      // (If it came purely from transfers, it might not exist in transactions yet with this exact ID)
       if (editingTransaction.source_table === "transactions") {
-        const { error: deleteError } = await supabase
-          .from("transactions")
-          .delete()
-          .eq("id", editingTransaction.id);
+        // 1. Update the transactions table via Edge Function (bypasses RLS)
+        console.log(`[EditTransactions] Updating transactions record ${editingTransaction.id} via Edge Function...`);
+        const { data: funcData, error: funcError } = await supabase.functions.invoke('admin-update-transaction', {
+          body: {
+            transactionId: editingTransaction.id,
+            tableName: 'transactions',
+            adminId: user.id,
+            targetUserId: selectedUser,
+            updates
+          }
+        });
 
-        if (deleteError) {
-          console.error("[EditTransactions] Delete error:", deleteError);
-          throw deleteError;
+        if (funcError) {
+          console.error("[EditTransactions] Edge Function error:", funcError);
+          throw new Error(funcError.message || "Failed to update via edge function");
         }
-      }
 
-      const { data: newTxn, error: insertError } = await supabase
-        .from("transactions")
-        .insert({
-          account_id: targetAccountId,
-          transaction_type: editingTransaction.transaction_type,
-          amount: parseFloat(editAmount),
-          description: editDescription,
-          recipient: editRecipient,
-          created_at: new Date(editDateTime).toISOString(),
-          status: editStatus,
-        })
-        .select();
+        success = funcData?.success;
 
-      if (insertError) {
-        console.error("[EditTransactions] Insert error:", insertError);
-        throw insertError;
-      }
-
-      success = newTxn && newTxn.length > 0;
-      console.log(`[EditTransactions] Delete+Insert: new record created`);
-
-      // Also sync the matching transfers record (frontend-level sync)
-      if (selectedUser) {
+        // 2. Sync the matching transfers record (direct client update - admin has UPDATE policy on transfers)
         const { data: matchingTransfers } = await supabase
           .from("transfers")
-          .select("*")
+          .select("id")
           .eq("user_id", selectedUser)
           .eq("amount", editingTransaction.amount)
           .ilike("recipient_name", editingTransaction.recipient || "");
 
         if (matchingTransfers && matchingTransfers.length > 0) {
           const matchTransfer = matchingTransfers[0];
-          console.log(`[EditTransactions] Syncing matching transfers record: ${matchTransfer.id}`);
-          // Direct update (admin has UPDATE policy on transfers)
+          console.log(`[EditTransactions] Syncing transfers record ${matchTransfer.id} via client...`);
           await supabase
             .from("transfers")
             .update({
@@ -240,6 +210,63 @@ export const EditTransactions = () => {
             })
             .eq("id", matchTransfer.id);
         }
+
+      } else {
+        // Source table is 'transfers'
+        // 1. Update the transfers table via client update (admin has UPDATE policy)
+        console.log(`[EditTransactions] Updating transfers record ${editingTransaction.id} via client...`);
+        const { error: transferUpdateError } = await supabase
+          .from("transfers")
+          .update({
+            amount: parseFloat(editAmount),
+            recipient_name: editRecipient,
+            created_at: new Date(editDateTime).toISOString(),
+            status: editStatus,
+          })
+          .eq("id", editingTransaction.id);
+
+        if (transferUpdateError) {
+          console.error("[EditTransactions] Transfers update error:", transferUpdateError);
+          throw transferUpdateError;
+        }
+
+        success = true;
+
+        // 2. Sync the matching transactions record via Edge Function (bypasses RLS)
+        const { data: userAccounts } = await supabase
+          .from("accounts")
+          .select("id")
+          .eq("user_id", selectedUser);
+          
+        if (userAccounts && userAccounts.length > 0) {
+          const accountIds = userAccounts.map(a => a.id);
+          const { data: matchingTxns } = await supabase
+            .from("transactions")
+            .select("id")
+            .in("account_id", accountIds)
+            .eq("amount", editingTransaction.amount)
+            .ilike("recipient", editingTransaction.recipient || "");
+
+          if (matchingTxns && matchingTxns.length > 0) {
+            const matchTxn = matchingTxns[0];
+            console.log(`[EditTransactions] Syncing transactions record ${matchTxn.id} via Edge Function...`);
+            
+            // Note: We don't throw an error if this sync fails, just log it, as the main update succeeded
+            const { error: syncError } = await supabase.functions.invoke('admin-update-transaction', {
+              body: {
+                transactionId: matchTxn.id,
+                tableName: 'transactions',
+                adminId: user.id,
+                targetUserId: selectedUser,
+                updates
+              }
+            });
+            
+            if (syncError) {
+              console.warn("[EditTransactions] Failed to sync transaction record:", syncError);
+            }
+          }
+        }
       }
 
       // Log the action
@@ -249,7 +276,7 @@ export const EditTransactions = () => {
         target_user_id: selectedUser,
         details: {
           transaction_id: editingTransaction.id,
-          source_table: "transactions",
+          source_table: editingTransaction.source_table,
           synced_both_tables: true,
           changes: {
             amount: parseFloat(editAmount),
@@ -258,7 +285,7 @@ export const EditTransactions = () => {
             created_at: editDateTime,
             status: editStatus,
           }
-        },
+        }
       });
 
       if (success) {
