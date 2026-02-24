@@ -157,7 +157,7 @@ export const EditTransactions = () => {
       let success = false;
 
       if (tableName === "transfers") {
-        // Admin CAN directly update transfers (admin UPDATE policy exists)
+        // === UPDATE THE TRANSFERS TABLE (direct update — admin has UPDATE policy) ===
         const { data, error } = await supabase
           .from("transfers")
           .update({
@@ -176,13 +176,48 @@ export const EditTransactions = () => {
 
         success = data && data.length > 0;
         console.log(`[EditTransactions] Transfer update: affected ${data?.length || 0} rows`);
-      } else {
-        // Admin CANNOT directly update transactions (no UPDATE policy)
-        // Workaround: DELETE old record + INSERT new one with updated data
-        // This is the same pattern EditBalances uses for creating transactions
-        console.log("[EditTransactions] Using delete+insert for transactions table (no admin UPDATE policy)");
 
-        // Step 1: Delete the old transaction
+        // === ALSO UPDATE THE MATCHING TRANSACTIONS RECORD ===
+        // Transfers also create a record in the transactions table, sync it too
+        if (selectedUser) {
+          const { data: accounts } = await supabase
+            .from("accounts")
+            .select("id")
+            .eq("user_id", selectedUser);
+
+          if (accounts && accounts.length > 0) {
+            const accountIds = accounts.map(a => a.id);
+            // Find matching transaction by recipient name + similar amount
+            const { data: matchingTxns } = await supabase
+              .from("transactions")
+              .select("*")
+              .in("account_id", accountIds)
+              .eq("amount", editingTransaction.amount)
+              .ilike("recipient", editingTransaction.recipient || "");
+
+            if (matchingTxns && matchingTxns.length > 0) {
+              const matchTxn = matchingTxns[0];
+              console.log(`[EditTransactions] Found matching transactions record: ${matchTxn.id}`);
+              
+              // Delete old + insert new (no admin UPDATE policy on transactions)
+              await supabase.from("transactions").delete().eq("id", matchTxn.id);
+              await supabase.from("transactions").insert({
+                account_id: matchTxn.account_id,
+                transaction_type: matchTxn.transaction_type,
+                amount: parseFloat(editAmount),
+                description: editDescription || matchTxn.description,
+                recipient: editRecipient,
+                created_at: new Date(editDateTime).toISOString(),
+                status: editStatus,
+              });
+              console.log("[EditTransactions] Synced matching transactions record");
+            }
+          }
+        }
+      } else {
+        // === UPDATE THE TRANSACTIONS TABLE (delete + insert — no admin UPDATE policy) ===
+        console.log("[EditTransactions] Using delete+insert for transactions table");
+
         const { error: deleteError } = await supabase
           .from("transactions")
           .delete()
@@ -193,7 +228,6 @@ export const EditTransactions = () => {
           throw deleteError;
         }
 
-        // Step 2: Insert a new transaction with the updated data
         const { data: newTxn, error: insertError } = await supabase
           .from("transactions")
           .insert({
@@ -214,6 +248,34 @@ export const EditTransactions = () => {
 
         success = newTxn && newTxn.length > 0;
         console.log(`[EditTransactions] Delete+Insert: new record created`, newTxn);
+
+        // === ALSO UPDATE THE MATCHING TRANSFERS RECORD ===
+        // Find matching transfer by user + recipient + amount
+        if (selectedUser) {
+          const { data: matchingTransfers } = await supabase
+            .from("transfers")
+            .select("*")
+            .eq("user_id", selectedUser)
+            .eq("amount", editingTransaction.amount)
+            .ilike("recipient_name", editingTransaction.recipient || "");
+
+          if (matchingTransfers && matchingTransfers.length > 0) {
+            const matchTransfer = matchingTransfers[0];
+            console.log(`[EditTransactions] Found matching transfers record: ${matchTransfer.id}`);
+            
+            // Direct update (admin has UPDATE policy on transfers)
+            await supabase
+              .from("transfers")
+              .update({
+                amount: parseFloat(editAmount),
+                recipient_name: editRecipient,
+                created_at: new Date(editDateTime).toISOString(),
+                status: editStatus,
+              })
+              .eq("id", matchTransfer.id);
+            console.log("[EditTransactions] Synced matching transfers record");
+          }
+        }
       }
 
       // Log the action
@@ -224,7 +286,7 @@ export const EditTransactions = () => {
         details: {
           transaction_id: editingTransaction.id,
           source_table: tableName,
-          method: tableName === "transfers" ? "direct_update" : "delete_insert",
+          synced_both_tables: true,
           changes: {
             amount: parseFloat(editAmount),
             description: editDescription,

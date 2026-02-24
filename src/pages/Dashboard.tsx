@@ -115,81 +115,32 @@ const Dashboard = () => {
   };
 
   const loadRecentTransactions = async (userId: string) => {
-    let all: RecentTransaction[] = [];
-
-    // From transactions table
+    // From transactions table only (transfers are also recorded here)
     const { data: accs } = await supabase.from("accounts").select("id").eq("user_id", userId);
-    if (accs && accs.length > 0) {
-      const { data: txns } = await supabase
-        .from("transactions")
-        .select("*")
-        .in("account_id", accs.map(a => a.id))
-        .order("created_at", { ascending: false })
-        .limit(5);
-      if (txns) {
-        all = txns.map(t => ({
-          id: t.id,
-          amount: t.amount,
-          transaction_type: t.transaction_type,
-          description: t.description || t.transaction_type,
-          status: t.status || "completed",
-          created_at: t.created_at,
-        }));
-      }
+    if (!accs || accs.length === 0) {
+      setRecentTransactions([]);
+      return;
     }
 
-    // From transfers table
-    const { data: transfers } = await supabase
-      .from("transfers")
+    const { data: txns } = await supabase
+      .from("transactions")
       .select("*")
-      .eq("user_id", userId)
+      .in("account_id", accs.map(a => a.id))
       .order("created_at", { ascending: false })
       .limit(5);
-    if (transfers) {
-      const mapped = transfers.map(t => ({
+
+    if (txns) {
+      setRecentTransactions(txns.map(t => ({
         id: t.id,
         amount: t.amount,
-        transaction_type: "debit",
-        description: `${t.transfer_type} transfer to ${t.recipient_name}`,
-        status: t.status,
+        transaction_type: t.transaction_type,
+        description: t.description || t.transaction_type,
+        status: t.status || "completed",
         created_at: t.created_at,
-      }));
-      all = [...all, ...mapped];
+      })));
+    } else {
+      setRecentTransactions([]);
     }
-
-    // Check admin_logs for status overrides
-    const { data: adminOverrides } = await supabase
-      .from("admin_logs")
-      .select("details")
-      .eq("target_user_id", userId)
-      .in("action_type", ["override_transaction_status", "edit_transaction"])
-      .order("created_at", { ascending: false });
-
-    if (adminOverrides && adminOverrides.length > 0) {
-      const overrideMap = new Map<string, any>();
-      for (const log of adminOverrides) {
-        const details = log.details as any;
-        if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
-          overrideMap.set(details.transaction_id, details.changes);
-        }
-      }
-      all = all.map((txn) => {
-        const override = overrideMap.get(txn.id);
-        if (override) {
-          return {
-            ...txn,
-            status: override.status || txn.status,
-            amount: override.amount || txn.amount,
-            description: override.description || txn.description,
-          };
-        }
-        return txn;
-      });
-    }
-
-    // Sort and take latest 5
-    all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    setRecentTransactions(all.slice(0, 5));
   };
 
   const handleSignOut = async () => {
