@@ -58,49 +58,6 @@ const Profile = () => {
     loadProfile();
   }, [navigate]);
 
-  // Real-time subscription for profile updates
-  // FIXED: Removed filter to receive admin profile updates
-  useEffect(() => {
-    if (!user) return;
-    
-    const channel = supabase.channel('profile-changes').on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'profiles',
-      // NOTE: Removed filter to receive admin updates
-    }, (payload: any) => {
-      // Only reload if this is the current user's profile
-      if (payload.new?.id === user.id || payload.old?.id === user.id) {
-        loadProfile();
-      }
-    }).subscribe();
-
-    const loadProfile = async () => {
-      const { data } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", user.id)
-        .single();
-
-      if (data) {
-        setProfile({
-          full_name: data.full_name || "",
-          username: data.username || "",
-          email: data.email || "",
-          phone: data.phone || "",
-          address: data.address || "",
-          date_of_birth: data.date_of_birth || "",
-          age: data.age?.toString() || "",
-          profile_picture_url: data.profile_picture_url || ""
-        });
-      }
-    };
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user]);
-
   const handleSave = async () => {
     const { error } = await supabase
       .from("profiles")

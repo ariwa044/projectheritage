@@ -89,52 +89,16 @@ const Dashboard = () => {
   }, [navigate]);
 
   // Real-time subscription for account updates
-  // FIXED: Removed filter to receive all account changes, then filter in code
-  // This allows admin updates to trigger real-time sync for affected users
   useEffect(() => {
     if (!user) return;
     const channel = supabase.channel('account-changes').on('postgres_changes', {
       event: '*',
       schema: 'public',
       table: 'accounts',
-      // NOTE: Removed filter: `user_id=eq.${user.id}` to receive admin updates
-      // Code-level filtering happens in the callback
-    }, (payload: any) => {
-      // Only reload accounts if this change affects the current user
-      if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
-        loadAccounts(user.id);
-      }
+      filter: `user_id=eq.${user.id}`
+    }, () => {
+      loadAccounts(user.id);
     }).subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user]);
-
-  // Real-time subscription for transaction updates (handles admin edits and deletions)
-  useEffect(() => {
-    if (!user) return;
-    
-    const channel = supabase.channel('transaction-changes').on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'transactions',
-    }, (payload: any) => {
-      // Check if this transaction belongs to current user's accounts
-      // Reload when there's any change (UPDATE/DELETE for admin edits)
-      loadRecentTransactions(user.id);
-    })
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'transfers',
-    }, (payload: any) => {
-      // Only reload if this transfer affects the current user
-      if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
-        loadRecentTransactions(user.id);
-      }
-    })
-    .subscribe();
-    
     return () => {
       supabase.removeChannel(channel);
     };
@@ -193,8 +157,35 @@ const Dashboard = () => {
       all = [...all, ...mapped];
     }
 
-    // NOTE: Direct status updates are currently blocked by RLS for admins.
-    // Changes made in the Admin panel will only be visible there via admin_logs.
+    // Check admin_logs for status overrides
+    const { data: adminOverrides } = await supabase
+      .from("admin_logs")
+      .select("details")
+      .eq("target_user_id", userId)
+      .in("action_type", ["override_transaction_status", "edit_transaction"])
+      .order("created_at", { ascending: false });
+
+    if (adminOverrides && adminOverrides.length > 0) {
+      const overrideMap = new Map<string, any>();
+      for (const log of adminOverrides) {
+        const details = log.details as any;
+        if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
+          overrideMap.set(details.transaction_id, details.changes);
+        }
+      }
+      all = all.map((txn) => {
+        const override = overrideMap.get(txn.id);
+        if (override) {
+          return {
+            ...txn,
+            status: override.status || txn.status,
+            amount: override.amount || txn.amount,
+            description: override.description || txn.description,
+          };
+        }
+        return txn;
+      });
+    }
 
     // Sort and take latest 5
     all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());

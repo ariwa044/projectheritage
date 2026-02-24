@@ -45,35 +45,6 @@ const TransactionHistory = () => {
     checkUser();
   }, [navigate]);
 
-  // Real-time subscription for transaction updates (handles admin edits and deletions)
-  useEffect(() => {
-    if (!user) return;
-    
-    const channel = supabase.channel('tx-history-changes').on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'transactions',
-    }, (payload: any) => {
-      // Reload transactions to catch admin edits and deletions
-      loadTransactions(user.id);
-    })
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'transfers',
-    }, (payload: any) => {
-      // Only reload if this transfer affects the current user
-      if (payload.new?.user_id === user.id || payload.old?.user_id === user.id) {
-        loadTransactions(user.id);
-      }
-    })
-    .subscribe();
-    
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user]);
-
   const loadTransactions = async (userId: string) => {
     try {
       console.log("[TransactionHistory] Loading transactions for user:", userId);
@@ -125,9 +96,44 @@ const TransactionHistory = () => {
         allTransactions = [...allTransactions, ...mappedTransfers];
       }
 
-      // NOTE: Direct status updates are currently blocked by RLS for admins.
-      // Changes made in the Admin panel will only be visible there via admin_logs.
-      // A SQL policy update or Edge Function with service_role is required for client visibility.
+      // Check admin_logs for any status overrides (when direct DB update was blocked by RLS)
+      const { data: adminOverrides, error: overridesError } = await supabase
+        .from("admin_logs")
+        .select("details")
+        .eq("target_user_id", userId)
+        .in("action_type", ["override_transaction_status", "edit_transaction"])
+        .order("created_at", { ascending: false });
+
+      console.log("[TransactionHistory] Admin overrides found:", adminOverrides?.length || 0, overridesError ? `Error: ${overridesError.message}` : "");
+
+      if (adminOverrides && adminOverrides.length > 0) {
+        // Build a map of transaction_id -> latest override
+        const overrideMap = new Map<string, any>();
+        for (const log of adminOverrides) {
+          const details = log.details as any;
+          if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
+            overrideMap.set(details.transaction_id, details.changes);
+          }
+        }
+
+        console.log("[TransactionHistory] Override map entries:", Array.from(overrideMap.entries()).map(([id, changes]) => ({ id: id.slice(0, 8), newStatus: changes.status })));
+
+        // Apply overrides to transactions
+        allTransactions = allTransactions.map((txn) => {
+          const override = overrideMap.get(txn.id);
+          if (override) {
+            console.log(`[TransactionHistory] Applying override to txn ${txn.id.slice(0, 8)}: ${txn.status} -> ${override.status}`);
+            return {
+              ...txn,
+              status: override.status || txn.status,
+              amount: override.amount || txn.amount,
+              description: override.description || txn.description,
+              created_at: override.created_at ? new Date(override.created_at).toISOString() : txn.created_at,
+            };
+          }
+          return txn;
+        });
+      }
 
       // Sort by date descending
       allTransactions.sort((a, b) => {

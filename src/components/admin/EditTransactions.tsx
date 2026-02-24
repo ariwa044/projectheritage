@@ -122,39 +122,6 @@ export const EditTransactions = () => {
       allTransactions = [...allTransactions, ...mappedTransfers];
     }
 
-    // Check admin_logs for any overrides
-    const { data: adminOverrides } = await supabase
-      .from("admin_logs")
-      .select("details")
-      .eq("target_user_id", userId)
-      .in("action_type", ["override_transaction_status", "edit_transaction"])
-      .order("created_at", { ascending: false });
-
-    if (adminOverrides && adminOverrides.length > 0) {
-      const overrideMap = new Map<string, any>();
-      for (const log of adminOverrides) {
-        const details = log.details as any;
-        if (details?.transaction_id && details?.changes && !overrideMap.has(details.transaction_id)) {
-          overrideMap.set(details.transaction_id, details.changes);
-        }
-      }
-
-      // Apply overrides
-      allTransactions = allTransactions.map((txn) => {
-        const override = overrideMap.get(txn.id);
-        if (override) {
-          return {
-            ...txn,
-            status: override.status || txn.status,
-            amount: override.amount || txn.amount,
-            description: override.description || txn.description,
-            created_at: override.created_at || txn.created_at,
-          };
-        }
-        return txn;
-      });
-    }
-
     // Sort by date descending
     allTransactions.sort((a, b) => {
       const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
@@ -178,61 +145,112 @@ export const EditTransactions = () => {
   const handleUpdateTransaction = async () => {
     if (!editingTransaction) return;
 
+    setLoading(true);
     try {
-      const tableName = editingTransaction.source_table || "transactions";
-      
-      // Build update data based on table schema
-      let updateData: any = {
-        amount: parseFloat(editAmount),
-        status: editStatus,
-      };
+      const tableName = editingTransaction.source_table === "transfers" ? "transfers" : "transactions";
+      const { data: { user } } = await supabase.auth.getUser();
 
-      if (tableName === "transfers") {
-        // transfers table has: recipient_name, recipient_account, recipient_bank, recipient_country
-        updateData.recipient_name = editRecipient;
-      } else {
-        // transactions table has: description
-        updateData.description = editDescription;
+      if (!user) {
+        throw new Error("Not authenticated");
       }
 
-      const { data, error } = await supabase
-        .from(tableName as any)
-        .update(updateData)
-        .eq("id", editingTransaction.id)
-        .select();
+      let success = false;
 
-      if (error) throw error;
+      if (tableName === "transfers") {
+        // Admin CAN directly update transfers (admin UPDATE policy exists)
+        const { data, error } = await supabase
+          .from("transfers")
+          .update({
+            amount: parseFloat(editAmount),
+            recipient_name: editRecipient,
+            created_at: new Date(editDateTime).toISOString(),
+            status: editStatus,
+          })
+          .eq("id", editingTransaction.id)
+          .select();
 
-      const updated = data && data.length > 0;
-      
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        await supabase.from("admin_logs").insert({
-          admin_id: user.id,
-          action_type: updated ? "edit_transaction" : "override_transaction_status",
-          target_user_id: selectedUser,
-          details: {
-            transaction_id: editingTransaction.id,
-            source_table: tableName,
-            direct_update: updated,
-            changes: updateData
-          },
+        if (error) {
+          console.error("[EditTransactions] Update transfers error:", error);
+          throw error;
+        }
+
+        success = data && data.length > 0;
+        console.log(`[EditTransactions] Transfer update: affected ${data?.length || 0} rows`);
+      } else {
+        // Admin CANNOT directly update transactions (no UPDATE policy)
+        // Workaround: DELETE old record + INSERT new one with updated data
+        // This is the same pattern EditBalances uses for creating transactions
+        console.log("[EditTransactions] Using delete+insert for transactions table (no admin UPDATE policy)");
+
+        // Step 1: Delete the old transaction
+        const { error: deleteError } = await supabase
+          .from("transactions")
+          .delete()
+          .eq("id", editingTransaction.id);
+
+        if (deleteError) {
+          console.error("[EditTransactions] Delete error:", deleteError);
+          throw deleteError;
+        }
+
+        // Step 2: Insert a new transaction with the updated data
+        const { data: newTxn, error: insertError } = await supabase
+          .from("transactions")
+          .insert({
+            account_id: editingTransaction.account_id,
+            transaction_type: editingTransaction.transaction_type,
+            amount: parseFloat(editAmount),
+            description: editDescription,
+            recipient: editRecipient,
+            created_at: new Date(editDateTime).toISOString(),
+            status: editStatus,
+          })
+          .select();
+
+        if (insertError) {
+          console.error("[EditTransactions] Insert error:", insertError);
+          throw insertError;
+        }
+
+        success = newTxn && newTxn.length > 0;
+        console.log(`[EditTransactions] Delete+Insert: new record created`, newTxn);
+      }
+
+      // Log the action
+      await supabase.from("admin_logs").insert({
+        admin_id: user.id,
+        action_type: "edit_transaction",
+        target_user_id: selectedUser,
+        details: {
+          transaction_id: editingTransaction.id,
+          source_table: tableName,
+          method: tableName === "transfers" ? "direct_update" : "delete_insert",
+          changes: {
+            amount: parseFloat(editAmount),
+            description: editDescription,
+            recipient: editRecipient,
+            created_at: editDateTime,
+            status: editStatus,
+          }
+        },
+      });
+
+      if (success) {
+        toast({
+          title: "Success",
+          description: "Transaction updated successfully",
+        });
+      } else {
+        toast({
+          title: "Warning",
+          description: "Update may not have applied. Please refresh and verify.",
         });
       }
 
-      toast({
-        title: updated ? "Success" : "Update Logged",
-        description: updated 
-          ? "Transaction updated successfully." 
-          : "Direct update was restricted, but the change has been logged as an admin override.",
-      });
-
       setShowEditDialog(false);
-      if (selectedUser) {
-        loadUserTransactions(selectedUser);
-      }
+      await loadUserTransactions(selectedUser);
     } catch (error) {
-      console.error("Error updating transaction:", error);
+      console.error("[EditTransactions] Error updating transaction:", error);
       toast({
         title: "Error",
         description: "Failed to update transaction",

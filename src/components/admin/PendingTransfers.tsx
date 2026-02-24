@@ -60,12 +60,14 @@ export const PendingTransfers = () => {
 
   const approveTransfer = async (transfer: any) => {
     const { data: { user } } = await supabase.auth.getUser();
-    
+    if (!user) return;
+
+    // Admin CAN directly update transfers (admin UPDATE policy exists)
     const { error } = await supabase
       .from("transfers")
       .update({ 
         status: "completed",
-        approved_by: user?.id 
+        approved_by: user.id 
       })
       .eq("id", transfer.id);
 
@@ -79,14 +81,12 @@ export const PendingTransfers = () => {
     }
 
     // Log action
-    if (user) {
-      await supabase.from("admin_logs").insert({
-        admin_id: user.id,
-        action_type: "approve_transfer",
-        target_user_id: transfer.user_id,
-        details: { transfer_id: transfer.id, amount: transfer.amount },
-      });
-    }
+    await supabase.from("admin_logs").insert({
+      admin_id: user.id,
+      action_type: "approve_transfer",
+      target_user_id: transfer.user_id,
+      details: { transfer_id: transfer.id, amount: transfer.amount },
+    });
 
     toast({
       title: "Success",
@@ -112,12 +112,14 @@ export const PendingTransfers = () => {
     }
 
     const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
+    // Admin CAN directly update transfers (admin UPDATE policy exists)
     const { error } = await supabase
       .from("transfers")
       .update({ 
         status: "failed",
-        approved_by: user?.id,
+        approved_by: user.id,
         rejection_reason: rejectionReason
       })
       .eq("id", selectedTransfer.id);
@@ -132,18 +134,16 @@ export const PendingTransfers = () => {
     }
 
     // Log action
-    if (user) {
-      await supabase.from("admin_logs").insert({
-        admin_id: user.id,
-        action_type: "reject_transfer",
-        target_user_id: selectedTransfer.user_id,
-        details: { 
-          transfer_id: selectedTransfer.id, 
-          amount: selectedTransfer.amount,
-          reason: rejectionReason 
-        },
-      });
-    }
+    await supabase.from("admin_logs").insert({
+      admin_id: user.id,
+      action_type: "reject_transfer",
+      target_user_id: selectedTransfer.user_id,
+      details: { 
+        transfer_id: selectedTransfer.id, 
+        amount: selectedTransfer.amount,
+        reason: rejectionReason 
+      },
+    });
 
     toast({
       title: "Success",
