@@ -161,24 +161,45 @@ export const EditTransactions = () => {
       }
 
       let success = false;
+      let targetAccountId = editingTransaction.account_id;
+
+      // If this record came from the transfers table fallback, it might have an empty account_id.
+      // We must look up the correct account_id for this user before inserting into transactions.
+      if (!targetAccountId && selectedUser) {
+        const { data: userAccounts } = await supabase
+          .from("accounts")
+          .select("id")
+          .eq("user_id", selectedUser)
+          .limit(1);
+          
+        if (userAccounts && userAccounts.length > 0) {
+          targetAccountId = userAccounts[0].id;
+        } else {
+          throw new Error("Could not find an account for this user to attach the transaction to.");
+        }
+      }
 
       // Delete + insert on transactions — no admin UPDATE policy
       console.log("[EditTransactions] Using delete+insert for transactions table");
 
-      const { error: deleteError } = await supabase
-        .from("transactions")
-        .delete()
-        .eq("id", editingTransaction.id);
+      // Only attempt delete if this record actually came from the transactions table
+      // (If it came purely from transfers, it might not exist in transactions yet with this exact ID)
+      if (editingTransaction.source_table === "transactions") {
+        const { error: deleteError } = await supabase
+          .from("transactions")
+          .delete()
+          .eq("id", editingTransaction.id);
 
-      if (deleteError) {
-        console.error("[EditTransactions] Delete error:", deleteError);
-        throw deleteError;
+        if (deleteError) {
+          console.error("[EditTransactions] Delete error:", deleteError);
+          throw deleteError;
+        }
       }
 
       const { data: newTxn, error: insertError } = await supabase
         .from("transactions")
         .insert({
-          account_id: editingTransaction.account_id,
+          account_id: targetAccountId,
           transaction_type: editingTransaction.transaction_type,
           amount: parseFloat(editAmount),
           description: editDescription,
