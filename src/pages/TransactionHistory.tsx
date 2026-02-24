@@ -47,40 +47,72 @@ const TransactionHistory = () => {
 
   const loadTransactions = async (userId: string) => {
     try {
-      // Fetch user's accounts
+      let allTransactions: Transaction[] = [];
+
+      // 1. Fetch user's accounts to get general transactions
       const { data: accounts } = await supabase
         .from("accounts")
         .select("id")
         .eq("user_id", userId);
 
-      if (!accounts || accounts.length === 0) {
-        setTransactions([]);
-        setFilteredTransactions([]);
-        setLoading(false);
-        return;
+      if (accounts && accounts.length > 0) {
+        const accountIds = accounts.map((acc) => acc.id);
+        const { data: txns, error: txnError } = await supabase
+          .from("transactions")
+          .select("*")
+          .in("account_id", accountIds)
+          .order("created_at", { ascending: false });
+
+        if (txnError) {
+          console.error("[TransactionHistory] Error fetching transactions:", txnError);
+        } else if (txns) {
+          allTransactions = txns.map(t => ({
+            id: t.id,
+            amount: t.amount,
+            transaction_type: t.transaction_type,
+            description: t.description || t.transaction_type,
+            recipient: t.recipient,
+            status: t.status || "completed",
+            created_at: t.created_at,
+          }));
+        }
       }
 
-      // Fetch ONLY from transactions table (transfers are also recorded here)
-      const accountIds = accounts.map((acc) => acc.id);
-      const { data: txns, error: txnError } = await supabase
-        .from("transactions")
+      // 2. Fetch specific 'transfers' (source of truth for status)
+      const { data: transfers, error: transfersError } = await supabase
+        .from("transfers")
         .select("*")
-        .in("account_id", accountIds)
+        .eq("user_id", userId)
         .order("created_at", { ascending: false });
 
-      if (txnError) {
-        console.error("[TransactionHistory] Error fetching transactions:", txnError);
-      }
+      if (transfersError) {
+        console.error("[TransactionHistory] Error fetching transfers:", transfersError);
+      } else if (transfers && transfers.length > 0) {
+        const mappedTransfers: Transaction[] = transfers.map(t => ({
+          id: t.id,
+          amount: t.amount,
+          transaction_type: "debit", // All outgoing transfers are debits
+          description: `${t.transfer_type} to ${t.recipient_name}`,
+          recipient: t.recipient_name,
+          status: t.status || "pending",
+          created_at: t.created_at,
+        }));
 
-      const allTransactions: Transaction[] = (txns || []).map(t => ({
-        id: t.id,
-        amount: t.amount,
-        transaction_type: t.transaction_type,
-        description: t.description || t.transaction_type,
-        recipient: t.recipient,
-        status: t.status || "completed",
-        created_at: t.created_at,
-      }));
+        // Merge and deduplicate: Give priority to 'transfers' table records because they have the Admin-updated status
+        const merged: Transaction[] = [...mappedTransfers];
+        
+        for (const txn of allTransactions) {
+          // If this generic transaction doesn't match any of our detailed transfers, keep it
+          const existsInTransfers = mappedTransfers.some(
+            t => t.amount === txn.amount && (txn.recipient ? t.recipient?.includes(txn.recipient) : false)
+          );
+          
+          if (!existsInTransfers) {
+            merged.push(txn);
+          }
+        }
+        allTransactions = merged;
+      }
 
       setTransactions(allTransactions);
       setFilteredTransactions(allTransactions);
